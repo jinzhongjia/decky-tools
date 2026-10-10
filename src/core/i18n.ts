@@ -29,6 +29,7 @@ const ERRORS: Record<Lang, Record<string, string>> = {
     extract_failed: "解压失败,文件可能已损坏",
     already_installed: "该版本已安装",
     cancelled: "已取消",
+    unavailable: "组件不可用,请重新安装插件后重试",
   },
   en: {
     transport: "Cannot reach the plugin backend",
@@ -46,6 +47,7 @@ const ERRORS: Record<Lang, Record<string, string>> = {
     extract_failed: "Extraction failed, the archive may be corrupted",
     already_installed: "This version is already installed",
     cancelled: "Cancelled",
+    unavailable: "Component unavailable, please reinstall the plugin",
   },
 };
 
