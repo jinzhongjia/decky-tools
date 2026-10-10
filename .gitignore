@@ -11,3 +11,9 @@ __pycache__/
 .vscode/settings.json
 # dev 模式标记(仅 deploy 时在 Deck 上创建)
 dev_mode
+# Zig 构建产物与缓存
+backend/.zig-cache/
+backend/zig-out/
+backend/out/
+# 侧载时本地构建的子进程二进制(release 由 Decky CLI 构建进 zip)
+bin/
