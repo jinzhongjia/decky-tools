@@ -1,0 +1,11 @@
+{
+  "name": "Decky Tools",
+  "author": "jinzhongjia",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["tools", "proton", "proton-ge"],
+    "description": "SteamOS 游戏模式工具箱：一键下载 / 管理 GE-Proton、Proton-CachyOS 等兼容层运行时。",
+    "image": ""
+  }
+}

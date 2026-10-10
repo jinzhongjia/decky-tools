@@ -1,0 +1,10 @@
+packages:
+  - "."
+supportedArchitectures:
+  os:
+    - current
+  cpu:
+    - current
+  libc:
+    - glibc
+    - musl

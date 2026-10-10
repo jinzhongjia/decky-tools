@@ -1,0 +1,50 @@
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (Python 3.11)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11.16"
+      # 故意不装任何依赖:Decky 冻结的 Python 只能用 stdlib
+      - name: Run backend tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+
+  ui:
+    name: UI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24.21.0"
+          package-manager-cache: false
+      - name: Install pnpm
+        run: npm install --global --ignore-scripts pnpm@11.3.0
+      - name: Install locked frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck and formatting
+        run: pnpm lint
+      - name: Build frontend
+        run: pnpm build

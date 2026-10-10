@@ -1,0 +1,45 @@
+name: Release Assets
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-assets
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends curl git jq rsync
+
+      - name: Build plugin
+        run: bash scripts/decky-build.sh
+
+      - name: Get plugin name
+        id: plugin_info
+        run: echo "name=$(jq -r '.name' plugin.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload plugin zip to release
+        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: out/${{ steps.plugin_info.outputs.name }}.zip
+          asset_name: ${{ steps.plugin_info.outputs.name }}.zip
+          asset_content_type: application/zip
