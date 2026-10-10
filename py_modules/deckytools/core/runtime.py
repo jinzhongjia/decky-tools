@@ -27,7 +27,8 @@ def runtime_dir() -> str:
 
 
 def plugin_dir() -> str:
-    return (getattr(decky, "DECKY_PLUGIN_DIR", "") if decky else "") or os.getcwd()
+    value = getattr(decky, "DECKY_PLUGIN_DIR", "") if decky else ""
+    return value or os.environ.get("DECKY_PLUGIN_DIR") or os.getcwd()
 
 
 def user_home() -> str:
