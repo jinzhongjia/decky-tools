@@ -1,7 +1,7 @@
 {
   "name": "decky-tools",
   "version": "0.1.0",
-  "description": "SteamOS 游戏模式工具箱：Proton 运行时下载管理等",
+  "description": "SteamOS 游戏模式工具箱：Proton 运行时下载管理、系统监控等",
   "type": "module",
   "packageManager": "pnpm@11.3.0",
   "scripts": {
