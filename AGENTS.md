@@ -45,6 +45,10 @@ QAM (React)  ── callable("call", tool, method, params) ──▶  main.py �
    `strings.ts` 用 `defineStrings` 写中英文案,`index.tsx` 导出 `ToolDef`,加入 `src/tools/index.ts`。
 3. 后端方法与前端 `api.ts` 是同一契约的两端,**同一次改动里同步修改**。
 
+## 规划文档
+
+- `docs/launch-options.md` —— 启动参数预设(已调研,暂缓实现):参数目录、已验证的 Steam API、设计草案与待确认项。
+
 ## Coding rules
 
 - 单文件不超过 500 行,函数不超过 50 行。
