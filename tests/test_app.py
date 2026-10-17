@@ -68,6 +68,15 @@ class AppTest(unittest.IsolatedAsyncioTestCase):
         ok = await self.app.call("core", "set_option", {"key": "github_mirror", "value": ""})
         self.assertTrue(ok["ok"])
 
+    async def test_notifications_rpc(self):
+        await self.app.tools["echo"].ctx.notify("hello", {"a": 1})
+        pending = (await self.app.call("core", "notifications"))["data"]
+        self.assertEqual([(n["tool"], n["key"]) for n in pending], [("echo", "hello")])
+        await self.app.call("core", "ack", {"ids": [pending[0]["id"]]})
+        self.assertEqual((await self.app.call("core", "notifications"))["data"], [])
+        bad = await self.app.call("core", "ack", {"ids": "x"})
+        self.assertEqual(bad["error"], "invalid_request")
+
     async def test_task_dedup_and_cancel(self):
         first = (await self.app.call("echo", "slow"))["data"]
         again = (await self.app.call("echo", "slow"))["data"]

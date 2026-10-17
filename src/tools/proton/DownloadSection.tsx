@@ -1,60 +1,55 @@
 import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow } from "@decky/ui";
 
 import { useStore } from "../../core/store";
-import { isActive, useTaskByKey } from "../../core/tasks";
-import { fmtBytes, fmtDate } from "../../ui/format";
 import { ActionRow } from "../../ui/ActionRow";
 import { Badge } from "../../ui/Badge";
+import { fmtBytes, fmtDate } from "../../ui/format";
 import { TaskRow } from "../../ui/TaskProgress";
-import { Release, installKey } from "./api";
-import { SCOPE, install, loadReleases, selectSource, store } from "./state";
+import { ProtonView, ReleaseView } from "./api";
+import { SCOPE, actions, store } from "./state";
 import { t } from "./strings";
 
 const COLLAPSED = 5;
 const dim: React.CSSProperties = { opacity: 0.6, fontSize: "0.85em", textAlign: "center" };
 
-function ReleaseRow({ release, latest }: { release: Release; latest: boolean }) {
-  const { source, installed } = useStore(store);
-  const task = useTaskByKey(installKey(source, release.tag));
-  const done = installed.some((x) => x.name === release.name);
+function ReleaseRow({ release }: { release: ReleaseView }) {
   const label = (
     <span>
       {release.tag}
-      {latest && <Badge>{t("latest")}</Badge>}
+      {release.latest && <Badge>{t("latest")}</Badge>}
       {release.prerelease && <Badge tone="amber">{t("prerelease")}</Badge>}
     </span>
   );
-
   return (
     <PanelSectionRow>
-      {isActive(task) ? (
-        <TaskRow label={label} task={task} errorScope={SCOPE} />
+      {release.task ? (
+        <TaskRow label={label} task={release.task} errorScope={SCOPE} />
       ) : (
         <ActionRow
           label={label}
           description={`${fmtDate(release.published)} · ${fmtBytes(release.size)}`}
-          disabled={done}
-          action={done ? t("isInstalled") : t("install")}
-          onClick={() => install(release)}
+          disabled={release.installed}
+          action={release.installed ? t("isInstalled") : t("install")}
+          onClick={() => actions.install(release.tag)}
         />
       )}
     </PanelSectionRow>
   );
 }
 
-function ReleaseList() {
-  const { source, releases, loadingReleases, expanded, stale } = useStore(store);
-  const list = releases[source];
-  if (!list) return <div style={dim}>{loadingReleases ? t("loading") : t("noReleases")}</div>;
-  if (!list.length) return <div style={dim}>{t("noReleases")}</div>;
-  const shown = expanded ? list : list.slice(0, COLLAPSED);
+function ReleaseList({ view }: { view: ProtonView }) {
+  const { expanded } = useStore(store);
+  if (!view.releases_loaded)
+    return <div style={dim}>{view.loading ? t("loading") : t("noReleases")}</div>;
+  if (!view.releases.length) return <div style={dim}>{t("noReleases")}</div>;
+  const shown = expanded ? view.releases : view.releases.slice(0, COLLAPSED);
   return (
     <>
-      {stale && <div style={dim}>{t("stale")}</div>}
-      {shown.map((r, i) => (
-        <ReleaseRow key={r.tag} release={r} latest={i === 0 && !r.prerelease} />
+      {view.stale && <div style={dim}>{t("stale")}</div>}
+      {shown.map((r) => (
+        <ReleaseRow key={r.tag} release={r} />
       ))}
-      {list.length > COLLAPSED && (
+      {view.releases.length > COLLAPSED && (
         <PanelSectionRow>
           <ButtonItem layout="below" onClick={() => store.set({ expanded: !expanded })}>
             {expanded ? t("showLess") : t("showMore")}
@@ -65,30 +60,27 @@ function ReleaseList() {
   );
 }
 
-export function DownloadSection() {
-  const { sources, source, v3, loadingReleases } = useStore(store);
-  const hasV3 = v3 && !!sources.find((s) => s.id === source)?.has_v3;
+export function DownloadSection({ view }: { view: ProtonView }) {
+  const source = view.sources.find((s) => s.id === view.source);
   return (
     <PanelSection title={t("download")}>
-      {sources.length > 0 && (
-        <PanelSectionRow>
-          <DropdownItem
-            label={t("source")}
-            rgOptions={sources.map((s) => ({ data: s.id, label: s.name }))}
-            selectedOption={source}
-            onChange={(opt) => selectSource(opt.data as string)}
-          />
-        </PanelSectionRow>
-      )}
-      {hasV3 && (
+      <PanelSectionRow>
+        <DropdownItem
+          label={t("source")}
+          rgOptions={view.sources.map((s) => ({ data: s.id, label: s.name }))}
+          selectedOption={view.source}
+          onChange={(opt) => actions.selectSource(opt.data as string)}
+        />
+      </PanelSectionRow>
+      {source?.v3 && (
         <PanelSectionRow>
           <div style={dim}>{t("v3Hint")}</div>
         </PanelSectionRow>
       )}
-      <ReleaseList />
+      <ReleaseList view={view} />
       <PanelSectionRow>
-        <ButtonItem layout="below" disabled={loadingReleases} onClick={() => loadReleases(true)}>
-          {loadingReleases ? t("loading") : t("refresh")}
+        <ButtonItem layout="below" disabled={view.loading} onClick={actions.refresh}>
+          {view.loading ? t("loading") : t("refresh")}
         </ButtonItem>
       </PanelSectionRow>
     </PanelSection>

@@ -3,17 +3,14 @@ import { staticClasses } from "@decky/ui";
 import { FaToolbox } from "react-icons/fa";
 
 import { attachEvents, detachEvents } from "./core/api";
-import { startTaskSync } from "./core/tasks";
-import { TOOLS } from "./tools";
+import { startCommands } from "./core/commands";
 import { Boundary } from "./ui/Boundary";
 import { Hub } from "./ui/Hub";
+import { startNotifications } from "./ui/notifications";
 
 export default definePlugin(() => {
   attachEvents();
-  const cleanups = [
-    startTaskSync(),
-    ...TOOLS.flatMap((tool) => (tool.setup ? [tool.setup()] : [])),
-  ];
+  const cleanups = [startNotifications(), startCommands()];
   return {
     name: "Decky Tools",
     titleView: <div className={staticClasses.Title}>Decky Tools</div>,

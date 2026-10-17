@@ -9,10 +9,13 @@ from typing import Any, Awaitable, Callable
 
 from . import runtime
 from .log import Logger
+from .notify import Notifier
 from .settings import ScopedSettings
-from .tasks import TaskHandle, TaskManager
+from .tasks import OnChange, TaskHandle, TaskManager
 
 EVENT = "decky_tools_event"  # 唯一的 decky.emit 事件名,载荷 {tool, type, data}
+# 只有 Steam 前端能执行的动作;后端下令,前端照做(src/core/commands.ts)
+COMMANDS = frozenset({"restart_steam"})
 
 
 def rpc(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
@@ -21,8 +24,12 @@ def rpc(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
 
 
 class Context:
-    def __init__(self, tool_id: str, settings: ScopedSettings, tasks: TaskManager, core_settings: ScopedSettings):
+    def __init__(
+        self, tool_id: str, settings: ScopedSettings, tasks: TaskManager,
+        core_settings: ScopedSettings, notifier: Notifier,
+    ):
         self.tool_id = tool_id
+        self._notifier = notifier
         self.settings = settings
         self.core_settings = core_settings  # 只读用途:全局选项(如下载镜像)
         self.log = Logger(tool_id)
@@ -33,14 +40,27 @@ class Context:
     async def emit(self, type_: str, data: Any = None) -> None:
         await runtime.emit(EVENT, {"tool": self.tool_id, "type": type_, "data": data})
 
+    async def notify(self, key: str, params: dict[str, Any] | None = None) -> None:
+        """发一条用户通知;文案由前端按 (tool, key, params) 本地化。"""
+        await self._notifier.add(self.tool_id, key, params)
+
+    async def command(self, name: str) -> None:
+        """令前端执行只有 Steam 前端能做的动作。"""
+        assert name in COMMANDS, name
+        await runtime.emit(EVENT, {"tool": "core", "type": "command", "data": {"name": name}})
+
     def start_task(
         self, kind: str, key: str, title: str,
         body: Callable[[TaskHandle], Awaitable[None]], meta: dict[str, Any] | None = None,
+        on_change: OnChange | None = None,
     ) -> dict[str, Any]:
-        return self._tasks.start(self.tool_id, kind, f"{self.tool_id}:{key}", title, body, meta)
+        return self._tasks.start(self.tool_id, kind, self._task_key(key), title, body, meta, on_change)
 
-    def tasks(self) -> list[dict[str, Any]]:
-        return self._tasks.list(self.tool_id)
+    def task_snapshot(self, key: str) -> dict[str, Any] | None:
+        return self._tasks.snapshot(self._task_key(key))
+
+    def _task_key(self, key: str) -> str:
+        return f"{self.tool_id}:{key}"
 
 
 class Tool:

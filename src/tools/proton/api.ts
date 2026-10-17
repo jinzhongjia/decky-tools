@@ -1,58 +1,56 @@
 import { invoke } from "../../core/api";
-import type { Task } from "../../core/tasks";
+import type { TaskView } from "../../ui/TaskProgress";
 
-// proton 工具的后端接口,对应 py_modules/deckytools/tools/proton/tool.py 的 @rpc 方法。
+// proton 工具的后端接口与界面快照,对应 py_modules/deckytools/tools/proton/tool.py。
+// 所有状态与判断(是否已安装、是否最新、是否需要重启、进行中任务)都由后端给出。
 export const TOOL = "proton";
 
-export interface Source {
+export interface SourceView {
   id: string;
   name: string;
-  repo: string;
-  homepage: string;
-  has_v3: boolean;
+  /** 本机会使用 x86-64-v3 优化包 */
+  v3: boolean;
 }
 
-export interface Release {
+export interface ReleaseView {
   tag: string;
   published: string;
-  prerelease: boolean;
-  asset: string;
-  name: string; // 安装后的目录名(= 压缩包去后缀)
   size: number;
-  url: string;
-  checksum_url: string;
+  prerelease: boolean;
+  latest: boolean;
+  installed: boolean;
+  task: TaskView | null;
 }
 
 export interface InstalledTool {
   name: string;
   display_name: string;
-  symlink: boolean;
   foreign_arch: boolean;
-  mtime: number;
 }
 
-export interface InstalledState {
-  dir: string;
-  tools: InstalledTool[];
+export interface ProtonView {
+  sources: SourceView[];
+  source: string;
+  releases: ReleaseView[];
+  releases_loaded: boolean;
+  loading: boolean;
+  stale: boolean;
+  error: string | null;
+  installed: InstalledTool[];
+  installed_loaded: boolean;
+  restart_needed: boolean;
+}
+
+export function isView(v: unknown): v is ProtonView {
+  const s = v as ProtonView;
+  return !!s && Array.isArray(s.sources) && Array.isArray(s.releases) && Array.isArray(s.installed);
 }
 
 export const protonApi = {
-  sources: () => invoke<{ sources: Source[]; x86_64_v3: boolean }>(TOOL, "sources"),
-  releases: (source: string, refresh = false) =>
-    invoke<{ releases: Release[]; fetched: number; stale?: boolean }>(TOOL, "releases", {
-      source,
-      refresh,
-    }),
-  installed: () => invoke<InstalledState>(TOOL, "installed"),
-  install: (source: string, tag: string) => invoke<Task>(TOOL, "install", { source, tag }),
-  uninstall: (name: string) => invoke<InstalledState>(TOOL, "uninstall", { name }),
+  view: () => invoke<ProtonView>(TOOL, "view"),
+  selectSource: (source: string) => invoke<ProtonView>(TOOL, "select_source", { source }),
+  refresh: () => invoke<ProtonView>(TOOL, "refresh"),
+  install: (tag: string) => invoke<ProtonView>(TOOL, "install", { tag }),
+  uninstall: (name: string) => invoke<ProtonView>(TOOL, "uninstall", { name }),
+  restartSteam: () => invoke<null>(TOOL, "restart_steam"),
 };
-
-/** 与后端 ctx.start_task 的去重键一致:"<tool>:<source>:<tag>"。 */
-export const installKey = (source: string, tag: string) => `${TOOL}:${source}:${tag}`;
-
-export function isInstalledState(v: unknown): v is InstalledState {
-  if (!v || typeof v !== "object") return false;
-  const s = v as Record<string, unknown>;
-  return typeof s.dir === "string" && Array.isArray(s.tools);
-}

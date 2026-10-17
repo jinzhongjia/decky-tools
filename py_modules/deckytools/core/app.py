@@ -10,6 +10,7 @@ from typing import Any
 from . import runtime
 from .errors import INTERNAL, INVALID_REQUEST, UNKNOWN_METHOD, UNKNOWN_TOOL, ToolError
 from .log import Logger
+from .notify import Notifier
 from .settings import SettingsStore
 from .tasks import TaskManager
 from .tool import EVENT, Context, Tool, rpc
@@ -44,11 +45,23 @@ class CoreTool(Tool):
 
     @rpc
     async def tasks(self) -> list[dict[str, Any]]:
+        """调试用:所有任务的完整状态。界面状态由各工具的快照提供。"""
         return self._app.tasks.list()
 
     @rpc
     async def cancel_task(self, id: str) -> bool:
         return self._app.tasks.cancel(id)
+
+    @rpc
+    async def notifications(self) -> list[dict[str, Any]]:
+        """前端加载时补发尚未确认的通知。"""
+        return self._app.notifier.pending()
+
+    @rpc
+    async def ack(self, ids: list[str]) -> None:
+        if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+            raise ToolError(INVALID_REQUEST, "ids must be a list of strings")
+        self._app.notifier.ack(ids)
 
     @rpc
     async def get_options(self) -> dict[str, Any]:
@@ -65,17 +78,18 @@ class CoreTool(Tool):
 class App:
     def __init__(self, tool_classes: list[type[Tool]], settings: SettingsStore | None = None):
         self.settings = settings or SettingsStore()
-        self.tasks = TaskManager(self._emit_task)
+        self.tasks = TaskManager()
+        self.notifier = Notifier(self._emit_notify)
         self.tools: dict[str, Tool] = {CORE: CoreTool(self._ctx(CORE), self)}
         for cls in tool_classes:
             self.tools[cls.id] = cls(self._ctx(cls.id))
         self._methods = {tid: tool.methods() for tid, tool in self.tools.items()}
 
     def _ctx(self, tool_id: str) -> Context:
-        return Context(tool_id, self.settings.scoped(tool_id), self.tasks, self.settings.scoped(CORE))
+        return Context(tool_id, self.settings.scoped(tool_id), self.tasks, self.settings.scoped(CORE), self.notifier)
 
-    async def _emit_task(self, task: dict[str, Any]) -> None:
-        await runtime.emit(EVENT, {"tool": CORE, "type": "task", "data": task})
+    async def _emit_notify(self, note: dict[str, Any]) -> None:
+        await runtime.emit(EVENT, {"tool": CORE, "type": "notify", "data": note})
 
     async def start(self) -> None:
         for tool in self.tools.values():

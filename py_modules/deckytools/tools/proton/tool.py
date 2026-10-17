@@ -1,4 +1,7 @@
-"""Proton 运行时管理:浏览各源发布、下载安装到 compatibilitytools.d、卸载。"""
+"""Proton 运行时管理:浏览各源发布、下载安装到 compatibilitytools.d、卸载。
+
+本工具持有全部界面状态并推送完整快照(view 事件),前端只渲染、只回传用户操作。
+"""
 
 import asyncio
 import os
@@ -6,13 +9,14 @@ import time
 from typing import Any
 
 from ...core import net
-from ...core.errors import INVALID_REQUEST, NOT_FOUND, ToolError
+from ...core.errors import INTERNAL, INVALID_REQUEST, NOT_FOUND, Cancelled, ToolError
 from ...core.tasks import TaskHandle
 from ...core.tool import Tool, rpc
-from . import compat, cpu, installer
+from . import compat, cpu, installer, steam
 from .sources import BY_ID, SOURCES, Source, parse_releases
 
 _CACHE_TTL = 15 * 60
+_STEAM_CHECK_TTL = 5  # 快照推送很频繁(下载进度),/proc 扫描结果短暂缓存
 _PER_PAGE = 30
 
 
@@ -22,86 +26,181 @@ class ProtonTool(Tool):
     def __init__(self, ctx):
         super().__init__(ctx)
         self._cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
-        self._fetch_locks: dict[str, asyncio.Lock] = {}
+        self._fetching: dict[str, asyncio.Task] = {}
+        self._errors: dict[str, str] = {}  # 源 → 最近一次拉取失败的错误码
+        self._stale: set[str] = set()
+        self._installed: list[dict[str, Any]] | None = None
+        self._push_task: asyncio.Task | None = None
+        self._dirty = False
+        self._steam_checked: tuple[float, float | None] = (0.0, None)
 
     async def start(self) -> None:
         await asyncio.to_thread(compat.cleanup_staging, compat.compat_dir())
 
-    def _source(self, source: str) -> Source:
+    # ---- 用户操作 ----
+
+    @rpc
+    async def view(self) -> dict[str, Any]:
+        """当前完整快照;发布列表缺失或过期时顺带在后台拉取(完成后推送 view 事件)。"""
+        if self._installed is None:
+            await self._reload_installed()
+        self._ensure_releases(self._source(), force=False)
+        return self._snapshot()
+
+    @rpc
+    async def select_source(self, source: str) -> dict[str, Any]:
         if source not in BY_ID:
             raise ToolError(INVALID_REQUEST, "unknown source")
-        return BY_ID[source]
+        self.ctx.settings.set("source", source)
+        self._ensure_releases(BY_ID[source], force=False)
+        return self._snapshot()
 
     @rpc
-    async def sources(self) -> dict[str, Any]:
-        return {"sources": [s.to_dict() for s in SOURCES], "x86_64_v3": cpu.supports_v3()}
+    async def refresh(self) -> dict[str, Any]:
+        self._ensure_releases(self._source(), force=True)
+        return self._snapshot()
 
     @rpc
-    async def releases(self, source: str, refresh: bool = False) -> dict[str, Any]:
-        src = self._source(source)
-        requested = time.time()
-        # 同一源的并发请求串行化:后到者直接复用前者刚拉到的结果,省 GitHub API 配额
-        async with self._fetch_locks.setdefault(src.id, asyncio.Lock()):
-            cached = self._cache.get(src.id)
-            if cached and (cached[0] >= requested or (not refresh and requested - cached[0] < _CACHE_TTL)):
-                return {"releases": cached[1], "fetched": cached[0]}
-            return await self._fetch_releases(src, cached)
-
-    async def _fetch_releases(self, src: Source, cached: tuple[float, list[dict[str, Any]]] | None) -> dict[str, Any]:
-        url = f"https://api.github.com/repos/{src.repo}/releases?per_page={_PER_PAGE}"
-        try:
-            payload = await asyncio.to_thread(net.get_json, url)
-        except ToolError:
-            if cached:  # 网络失败时回退到旧缓存,前端据 stale 提示
-                return {"releases": cached[1], "fetched": cached[0], "stale": True}
-            raise
-        releases = parse_releases(src, payload)
-        self._cache[src.id] = (time.time(), releases)
-        self.ctx.log.info("releases", f"{src.id}: {len(releases)} releases")
-        return {"releases": releases, "fetched": time.time()}
-
-    @rpc
-    async def installed(self) -> dict[str, Any]:
-        base = compat.compat_dir()
-        return {"dir": base, "tools": await asyncio.to_thread(compat.list_installed, base)}
-
-    @rpc
-    async def tasks(self) -> list[dict[str, Any]]:
-        return self.ctx.tasks()
-
-    @rpc
-    async def install(self, source: str, tag: str) -> dict[str, Any]:
-        src = self._source(source)
-        release = await self._find_release(src, tag)
-        mirror = self.ctx.core_settings.get("github_mirror", "")
-        base = compat.compat_dir()
-        download_dir = os.path.join(self.ctx.data_dir, "downloads")
-
-        async def body(handle: TaskHandle) -> None:
-            name = await asyncio.to_thread(installer.install, handle, release, base, download_dir, mirror)
-            handle.task.meta["installed"] = name
-            self.ctx.log.info("install", f"installed {name}")
-            await self._push_installed()
-
-        meta = {"source": src.id, "tag": release["tag"], "name": release["name"]}
-        return self.ctx.start_task("install", f"{src.id}:{release['tag']}", release["name"], body, meta)
+    async def install(self, tag: str) -> dict[str, Any]:
+        src = self._source()
+        release = next((r for r in self._releases(src) if r["tag"] == tag), None)
+        if not release:
+            raise ToolError(NOT_FOUND, "release not found")
+        self.ctx.start_task(
+            "install", f"{src.id}:{tag}", release["name"], self._install_body(release),
+            {"source": src.id, "tag": tag, "name": release["name"]}, lambda _t: self._schedule_push(),
+        )
+        return self._snapshot()
 
     @rpc
     async def uninstall(self, name: str) -> dict[str, Any]:
-        base = compat.compat_dir()
-        await asyncio.to_thread(compat.remove, base, name)
+        await asyncio.to_thread(compat.remove, compat.compat_dir(), name)
         self.ctx.log.info("uninstall", f"removed {name}")
-        return await self._push_installed()
+        self._mark_restart()
+        await self._reload_installed()
+        return self._snapshot()
 
-    async def _find_release(self, src: Source, tag: str) -> dict[str, Any]:
-        for refresh in (False, True):
-            listing = await self.releases(src.id, refresh)
-            hit = next((r for r in listing["releases"] if r["tag"] == tag), None)
-            if hit:
-                return hit
-        raise ToolError(NOT_FOUND, "release not found")
+    @rpc
+    async def restart_steam(self) -> None:
+        await self.ctx.command("restart_steam")
 
-    async def _push_installed(self) -> dict[str, Any]:
-        state = await self.installed()
-        await self.ctx.emit("installed", state)
-        return state
+    # ---- 安装 ----
+
+    def _install_body(self, release: dict[str, Any]):
+        mirror = self.ctx.core_settings.get("github_mirror", "")
+        base = compat.compat_dir()
+        download_dir = os.path.join(self.ctx.data_dir, "downloads")
+        name = release["name"]
+
+        async def body(handle: TaskHandle) -> None:
+            try:
+                installed = await asyncio.to_thread(installer.install, handle, release, base, download_dir, mirror)
+            except Cancelled:
+                raise
+            except ToolError as e:
+                await self.ctx.notify("install_failed", {"name": name, "error": e.code})
+                raise
+            except Exception:
+                await self.ctx.notify("install_failed", {"name": name, "error": INTERNAL})
+                raise
+            self.ctx.log.info("install", f"installed {installed}")
+            self._mark_restart()
+            await self._reload_installed()
+            await self.ctx.notify("install_done", {"name": name})
+
+        return body
+
+    # ---- 发布列表 ----
+
+    def _source(self) -> Source:
+        return BY_ID.get(self.ctx.settings.get("source", ""), SOURCES[0])
+
+    def _releases(self, src: Source) -> list[dict[str, Any]]:
+        cached = self._cache.get(src.id)
+        return cached[1] if cached else []
+
+    def _ensure_releases(self, src: Source, force: bool) -> None:
+        cached = self._cache.get(src.id)
+        fresh = cached and time.time() - cached[0] < _CACHE_TTL
+        if (fresh and not force) or src.id in self._fetching:
+            return
+        self._fetching[src.id] = asyncio.create_task(self._fetch(src))
+
+    async def _fetch(self, src: Source) -> None:
+        self._schedule_push()  # 推送 loading 状态
+        url = f"https://api.github.com/repos/{src.repo}/releases?per_page={_PER_PAGE}"
+        try:
+            payload = await asyncio.to_thread(net.get_json, url)
+            self._cache[src.id] = (time.time(), parse_releases(src, payload))
+            self._errors.pop(src.id, None)
+            self._stale.discard(src.id)
+            self.ctx.log.info("releases", f"{src.id}: {len(self._cache[src.id][1])} releases")
+        except ToolError as e:
+            self._errors[src.id] = e.code
+            if src.id in self._cache:
+                self._stale.add(src.id)  # 网络失败但有旧缓存:继续展示并提示
+        finally:
+            self._fetching.pop(src.id, None)
+            self._schedule_push()
+
+    # ---- 已安装 / 重启 ----
+
+    async def _reload_installed(self) -> None:
+        self._installed = await asyncio.to_thread(compat.list_installed, compat.compat_dir())
+        self._schedule_push()
+
+    def _mark_restart(self) -> None:
+        self.ctx.settings.set("restart_marked_at", time.time())
+
+    def _restart_needed(self) -> bool:
+        """兼容层变化之后 Steam 还没重启过 → 需要重启;重启过就自动清除标记。"""
+        marked = self.ctx.settings.get("restart_marked_at")
+        if not marked:
+            return False
+        checked_at, started = self._steam_checked
+        if time.monotonic() - checked_at > _STEAM_CHECK_TTL:
+            started = steam.steam_started_at()
+            self._steam_checked = (time.monotonic(), started)
+        if started is not None and started > marked:
+            self.ctx.settings.set("restart_marked_at", None)
+            return False
+        return True
+
+    # ---- 快照 ----
+
+    def _snapshot(self) -> dict[str, Any]:
+        src = self._source()
+        installed = self._installed or []
+        names = {t["name"] for t in installed}
+        releases = [
+            {
+                "tag": r["tag"], "published": r["published"], "size": r["size"], "prerelease": r["prerelease"],
+                "latest": i == 0 and not r["prerelease"], "installed": r["name"] in names,
+                "task": self.ctx.task_snapshot(f"{src.id}:{r['tag']}"),
+            }
+            for i, r in enumerate(self._releases(src))
+        ]
+        return {
+            "sources": [{"id": s.id, "name": s.name, "v3": bool(s.v3_patterns) and cpu.supports_v3()} for s in SOURCES],
+            "source": src.id,
+            "releases": releases,
+            "releases_loaded": src.id in self._cache,
+            "loading": src.id in self._fetching,
+            "stale": src.id in self._stale,
+            "error": self._errors.get(src.id),
+            "installed": installed,
+            "installed_loaded": self._installed is not None,
+            "restart_needed": self._restart_needed(),
+        }
+
+    def _schedule_push(self) -> None:
+        """合并短时间内的多次变化,串行推送最新快照。"""
+        self._dirty = True
+        if self._push_task is None or self._push_task.done():
+            self._push_task = asyncio.create_task(self._push_loop())
+
+    async def _push_loop(self) -> None:
+        while self._dirty:
+            self._dirty = False
+            await self.ctx.emit("view", self._snapshot())
+            await asyncio.sleep(0)

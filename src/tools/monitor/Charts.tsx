@@ -2,11 +2,10 @@ import { PanelSection } from "@decky/ui";
 
 import { LineChart } from "../../ui/LineChart";
 import { MetricCard } from "../../ui/MetricCard";
-import { Sample } from "./api";
-import { freq, gb, join, pct, ratio, temp, watts } from "./format";
-import { useStore } from "../../core/store";
 import { Segmented } from "../../ui/Segmented";
-import { RANGES, SHORT, selectRange, store } from "./state";
+import { Current, MonitorView } from "./api";
+import { freq, gb, join, pct, temp, watts } from "./format";
+import { selectRange } from "./state";
 import { t } from "./strings";
 
 const COLORS = {
@@ -17,94 +16,76 @@ const COLORS = {
   battery: "#e5d34b",
 };
 
-/** 功耗:Steam Deck 用 APU 功耗;其它设备退回电池放电功率(充电时无意义,置空)。 */
-function powerMw(
-  apu: number | null | undefined,
-  battery: number | null | undefined
-): number | null {
-  if (apu != null) return apu;
-  return battery != null && battery > 0 ? battery : null;
+type ChartProps = { view: MonitorView; metric: keyof typeof COLORS; max?: number; minMax?: number };
+
+function Chart({ view, metric, max, minMax }: ChartProps) {
+  return (
+    <LineChart
+      values={view.series[metric] ?? []}
+      capacity={view.capacity}
+      color={COLORS[metric]}
+      max={max}
+      minMax={minMax}
+    />
+  );
 }
 
-const scaled = (values: (number | null)[] | undefined, div: number) =>
-  (values ?? []).map((v) => (v == null ? null : v / div));
-
-function Chart(props: { values: (number | null)[]; color: string; max?: number; minMax?: number }) {
-  const { capacity } = useStore(store);
-  return <LineChart capacity={capacity} {...props} />;
-}
-
-function RangePicker() {
-  const { range } = useStore(store);
+function RangePicker({ view }: { view: MonitorView }) {
   return (
     <Segmented
-      options={RANGES.map((r) => ({ value: r, label: t(r === SHORT ? "range2m" : "range30m") }))}
-      value={range}
+      options={view.ranges.map((r) => ({ value: r, label: t("rangeMinutes", { n: r / 60 }) }))}
+      value={view.range}
       onChange={selectRange}
     />
   );
 }
 
-export function PerformanceCharts({ s }: { s: Sample }) {
-  const { series } = useStore(store);
-  const memPct = (x: Sample) => ratio(x.mem_used_mb, x.mem_total_mb);
+export function PerformanceCharts({ view, c }: { view: MonitorView; c: Current }) {
   const memAmount =
-    s.mem_used_mb != null && s.mem_total_mb != null
-      ? `${gb(s.mem_used_mb)} / ${gb(s.mem_total_mb)}`
-      : gb(s.mem_total_mb);
+    c.mem_used_mb != null ? `${gb(c.mem_used_mb)} / ${gb(c.mem_total_mb)}` : gb(c.mem_total_mb);
   return (
     <PanelSection title={t("performance")}>
-      <RangePicker />
+      <RangePicker view={view} />
       <MetricCard
         label={t("cpu")}
-        value={pct(s.cpu_pct_x10)}
-        chart={<Chart values={scaled(series.cpu_pct_x10, 10)} color={COLORS.cpu} max={100} />}
-        detail={join(freq(s.cpu_mhz), temp(s.cpu_temp_mc))}
+        value={pct(c.cpu_pct)}
+        chart={<Chart view={view} metric="cpu" max={100} />}
+        detail={join(freq(c.cpu_mhz), temp(c.cpu_temp_c))}
       />
       <MetricCard
         label={t("gpu")}
-        value={s.gpu_pct == null ? null : `${s.gpu_pct}%`}
-        chart={<Chart values={scaled(series.gpu_pct, 1)} color={COLORS.gpu} max={100} />}
-        detail={join(freq(s.gpu_mhz), temp(s.gpu_temp_mc))}
+        value={pct(c.gpu_pct)}
+        chart={<Chart view={view} metric="gpu" max={100} />}
+        detail={join(freq(c.gpu_mhz), temp(c.gpu_temp_c))}
       />
       <MetricCard
         label={t("memory")}
-        value={memPct(s) == null ? null : `${Math.round(memPct(s)!)}%`}
-        chart={<Chart values={scaled(series.mem_pct_x10, 10)} color={COLORS.memory} max={100} />}
+        value={pct(c.mem_pct)}
+        chart={<Chart view={view} metric="memory" max={100} />}
         detail={memAmount}
       />
     </PanelSection>
   );
 }
 
-/** 窗口内峰值与均值,帮助读懂自适应纵轴的功耗图。 */
-function peakAvg(values: (number | null)[]): string | null {
-  const nums = values.filter((v): v is number => v != null);
-  if (nums.length < 2) return null;
-  const avg = nums.reduce((a, b) => a + b, 0) / nums.length;
-  return t("peakAvg", { peak: watts(Math.max(...nums))!, avg: watts(avg)! });
-}
-
-export function PowerCharts({ s }: { s: Sample }) {
-  const { series } = useStore(store);
-  const power = powerMw(s.apu_power_mw, s.battery_power_mw);
-  const apu = series.apu_power_mw ?? [];
-  const battery = series.battery_power_mw ?? [];
-  const powerSeries = apu.map((v, i) => powerMw(v, battery[i]));
-  const flow = s.battery_power_mw ? watts(s.battery_power_mw) : null;
+export function PowerCharts({ view, c }: { view: MonitorView; c: Current }) {
+  const stats = view.power_stats;
   return (
     <PanelSection title={t("power")}>
       <MetricCard
-        label={s.apu_power_mw != null ? t("apuPower") : t("dischargePower")}
-        value={power == null ? null : watts(power)}
-        chart={<Chart values={powerSeries} color={COLORS.power} minMax={5000} />}
-        detail={peakAvg(powerSeries)}
+        label={c.power_source === "apu" ? t("apuPower") : t("dischargePower")}
+        value={watts(c.power_mw)}
+        chart={<Chart view={view} metric="power" minMax={5000} />}
+        detail={stats && t("peakAvg", { peak: watts(stats.peak)!, avg: watts(stats.avg)! })}
       />
       <MetricCard
         label={t("battery")}
-        value={s.battery_pct == null ? null : `${s.battery_pct}%`}
-        chart={<Chart values={scaled(series.battery_pct, 1)} color={COLORS.battery} max={100} />}
-        detail={join(s.battery_status ? t(s.battery_status) : null, flow)}
+        value={pct(c.battery_pct)}
+        chart={<Chart view={view} metric="battery" max={100} />}
+        detail={join(
+          c.battery_status ? t(c.battery_status) : null,
+          c.battery_power_mw ? watts(c.battery_power_mw) : null
+        )}
       />
     </PanelSection>
   );

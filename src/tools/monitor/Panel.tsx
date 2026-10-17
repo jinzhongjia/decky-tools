@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { useStore } from "../../core/store";
 import { ErrorBanner } from "../../ui/ErrorBanner";
 import { InfoRow } from "../../ui/InfoRow";
+import { SystemInfo } from "./api";
 import { PerformanceCharts, PowerCharts } from "./Charts";
 import { join } from "./format";
 import { SCOPE, refreshInfo, startLive, store } from "./state";
@@ -11,8 +12,7 @@ import { t } from "./strings";
 
 const dim: React.CSSProperties = { opacity: 0.6, fontSize: "0.85em", textAlign: "center" };
 
-function SystemSection() {
-  const { info } = useStore(store);
+function SystemSection({ info }: { info: SystemInfo | null }) {
   const ip = info?.ip ? join(info.ip, info.interface ?? null) : info ? t("noNetwork") : null;
   const rows: [string, string | null | undefined][] = [
     [t("ip"), ip],
@@ -37,15 +37,16 @@ function SystemSection() {
 }
 
 export function MonitorPanel() {
-  const { sample } = useStore(store);
+  const { view } = useStore(store);
   useEffect(() => startLive(), []);
+  const c = view?.current;
   return (
     <>
       <ErrorBanner scope={SCOPE} />
-      {sample ? (
+      {view && c ? (
         <>
-          <PerformanceCharts s={sample} />
-          <PowerCharts s={sample} />
+          <PerformanceCharts view={view} c={c} />
+          <PowerCharts view={view} c={c} />
         </>
       ) : (
         <PanelSection>
@@ -54,7 +55,7 @@ export function MonitorPanel() {
           </PanelSectionRow>
         </PanelSection>
       )}
-      <SystemSection />
+      <SystemSection info={view?.info ?? null} />
     </>
   );
 }

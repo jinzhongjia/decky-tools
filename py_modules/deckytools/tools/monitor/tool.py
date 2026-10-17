@@ -1,8 +1,8 @@
 """系统监控:CPU / GPU / 内存 / 功耗 / 电池实时读数、最近 30 分钟历史与系统信息(IP 等)。
 
 采样由 Zig 写的 bin/dt-monitor 完成(源码 backend/):插件加载期间常驻,每秒采样并在
-自身内存里保留 30 分钟历史(不落盘)。实时推送按需开启:前端面板打开期间周期性 watch()
-续租,租约过期即通知子进程停止推送,Python 侧不再每秒被唤醒。
+自身内存里保留 30 分钟历史(不落盘)。面板打开期间前端周期性 watch() 续租,本工具每秒
+向子进程取所选时间范围的历史,用 view.build 整理成完整快照推给前端;租约过期即关闭推送。
 """
 
 import asyncio
@@ -12,6 +12,7 @@ from typing import Any
 from ...core.child import UNAVAILABLE, ChildProcess
 from ...core.errors import INVALID_REQUEST, ToolError
 from ...core.tool import Tool, rpc
+from . import view
 
 BINARY = "dt-monitor"
 LEASE_SECONDS = 15
@@ -37,6 +38,8 @@ class MonitorTool(Tool):
         self._next_start = 0.0
         self._backoff = 1.0
         self._supervisor: asyncio.Task | None = None
+        self._view: dict[str, Any] | None = None
+        self._history_lock = asyncio.Lock()  # history 请求串行:同类回复按类型匹配,窗口不同不能并发
 
     async def start(self) -> None:
         self._supervisor = asyncio.create_task(self._supervise())
@@ -48,11 +51,13 @@ class MonitorTool(Tool):
 
     @rpc
     async def watch(self) -> dict[str, Any]:
-        """开始/续租实时推送,返回最近一次采样与已缓存的系统信息。"""
+        """开始/续租实时推送(租约 LEASE_SECONDS),返回当前快照;之后每秒推送 view 事件。"""
         self._lease_until = time.monotonic() + LEASE_SECONDS
         await self._ensure_running()
         await self._set_live(True)
-        return {"sample": self._sample, "info": self._info, "lease": LEASE_SECONDS}
+        if self._info is None:
+            asyncio.create_task(self._load_info())
+        return self._view or view.build(self._sample, None, self._info, self._range(), list(RANGES))
 
     @rpc
     async def unwatch(self) -> None:
@@ -60,19 +65,42 @@ class MonitorTool(Tool):
         await self._set_live(False)
 
     @rpc
-    async def history(self, window: int) -> dict[str, Any]:
-        """最近 window 秒的分桶均值:{step_ms, keys, points}。"""
+    async def set_range(self, window: int) -> dict[str, Any]:
         if window not in RANGES:
             raise ToolError(INVALID_REQUEST, "unsupported history window")
-        await self._ensure_running()
-        return await self._request(f"history {window} {RANGES[window]}", "history")
+        self.ctx.settings.set("range", window)
+        await self._rebuild(wait=True)
+        return self._view or view.build(self._sample, None, self._info, window, list(RANGES))
 
     @rpc
-    async def info(self, refresh: bool = False) -> dict[str, Any]:
-        if self._info and not refresh:
-            return self._info
+    async def refresh_info(self) -> None:
         await self._ensure_running()
-        return await self._request("info", "info")
+        await self._load_info()
+
+    def _range(self) -> int:
+        window = self.ctx.settings.get("range", 120)
+        return window if window in RANGES else 120
+
+    async def _load_info(self) -> None:
+        try:
+            self._info = await self._request("info", "info")
+        except ToolError:
+            return
+        await self._rebuild(wait=True)
+
+    async def _rebuild(self, wait: bool = False) -> None:
+        """取所选范围的历史并推送完整快照。逐秒触发的重建遇到进行中的请求直接跳过(下一秒再来);
+        用户操作触发的(wait=True)排队执行,保证用上最新的范围。"""
+        if not self._child.running or (not wait and self._history_lock.locked()):
+            return
+        async with self._history_lock:
+            window = self._range()
+            try:
+                history = await self._request(f"history {window} {RANGES[window]}", "history")
+            except ToolError:
+                return
+            self._view = view.build(self._sample, history, self._info, window, list(RANGES))
+            await self.ctx.emit("view", self._view)
 
     async def _request(self, command: str, reply: str) -> dict[str, Any]:
         """发命令并等待对应类型的回复;同类并发请求共用一次查询。"""
@@ -129,7 +157,7 @@ class MonitorTool(Tool):
         kind, data = msg.get("type"), msg.get("data")
         if kind == "sample" and isinstance(data, dict):
             self._sample = data
-            await self.ctx.emit("sample", data)
+            asyncio.create_task(self._rebuild())
         elif kind in ("info", "history") and isinstance(data, dict):
             if kind == "info":
                 self._info = data

@@ -14,29 +14,33 @@ from deckytools.tools.monitor import MonitorTool
 
 # 模拟 dt-monitor 协议的假子进程:stdin EOF 退出;live on 时推 sample;响应 info / history
 FAKE = f"""#!{sys.executable}
-import json, sys, select
+import json, os, sys, select
 def out(o):
     sys.stdout.write(json.dumps(o) + "\\n"); sys.stdout.flush()
-n, live = 0, False
+n, live, buf = 0, False, b""
 while True:
-    r, _, _ = select.select([sys.stdin], [], [], 0.05)
+    r, _, _ = select.select([0], [], [], 0.05)
+    lines = []
     if r:
-        line = sys.stdin.readline()
-        if not line:
+        chunk = os.read(0, 4096)  # 不用缓冲 readline:多条命令同时到达时 select 不会再次唤醒
+        if not chunk:
             break
-        cmd = line.strip()
+        buf += chunk
+        *lines, buf = buf.split(b"\\n")
+    for raw in lines:
+        cmd = raw.decode().strip()
         if cmd in ("live on", "live off"):
             live = cmd == "live on"
         elif cmd == "info":
             out({{"type": "info", "data": {{"ip": "10.0.0.2", "hostname": "deck"}}}})
         elif cmd.startswith("history "):
             w, s = map(int, cmd.split()[1:])
-            out({{"type": "history", "data": {{"step_ms": s * 1000, "keys": ["cpu_pct_x10"], "points": [[1]] * (w // s)}}}})
-        else:
+            out({{"type": "history", "data": {{"step_ms": s * 1000, "keys": ["cpu_pct_x10", "apu_power_mw"], "points": [[n, 3000]] * (w // s)}}}})
+        elif cmd:
             out({{"type": "error", "code": "unknown_command"}})
     n += 1
     if live:
-        out({{"type": "sample", "data": {{"cpu_pct_x10": n}}}})
+        out({{"type": "sample", "data": {{"cpu_pct_x10": n, "apu_power_mw": 3000, "mem_used_mb": 4, "mem_total_mb": 16}}}})
 """
 
 
@@ -69,7 +73,7 @@ class MonitorTest(unittest.IsolatedAsyncioTestCase):
         os.chmod(self.binary, os.stat(self.binary).st_mode | stat.S_IEXEC)
 
     def samples(self):
-        return [e for e in self.events if e["type"] == "sample"]
+        return [e for e in self.events if e["tool"] == "monitor" and e["type"] == "view"]
 
     async def eventually(self, cond, what):
         for _ in range(150):
@@ -89,22 +93,25 @@ class MonitorTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.2)
         self.assertEqual(self.samples(), [])  # 没人看时不推送
 
-    async def test_watch_streams_samples_and_info(self):
+    async def test_watch_pushes_ready_to_render_view(self):
         self.install_fake()
         self.assertTrue((await self.app.call("monitor", "watch"))["ok"])
-        await self.eventually(lambda: self.samples(), "no sample event")
-        self.assertEqual(self.samples()[0]["tool"], "monitor")
-        infos = await asyncio.gather(*[self.app.call("monitor", "info", {"refresh": True}) for _ in range(3)])
-        self.assertTrue(all(i["data"]["ip"] == "10.0.0.2" for i in infos))
-        again = await self.app.call("monitor", "watch")
-        self.assertEqual(again["data"]["info"]["hostname"], "deck")
+        await self.eventually(lambda: any(e["data"]["info"] for e in self.samples()), "no view with info")
+        view = self.samples()[-1]["data"]
+        self.assertEqual(view["range"], 120)
+        self.assertEqual(view["capacity"], 120)
+        self.assertEqual(view["current"]["mem_pct"], 25)
+        self.assertEqual((view["current"]["power_mw"], view["current"]["power_source"]), (3000, "apu"))
+        self.assertEqual(view["power_stats"], {"peak": 3000, "avg": 3000})
+        self.assertEqual(view["info"]["ip"], "10.0.0.2")
 
-    async def test_history_ranges(self):
+    async def test_set_range(self):
         self.install_fake()
-        for window, buckets in ((120, 120), (1800, 180)):
-            res = await self.app.call("monitor", "history", {"window": window})
-            self.assertEqual(len(res["data"]["points"]), buckets)
-        bad = await self.app.call("monitor", "history", {"window": 999})
+        await self.app.call("monitor", "watch")
+        res = await self.app.call("monitor", "set_range", {"window": 1800})
+        self.assertEqual((res["data"]["range"], res["data"]["capacity"]), (1800, 180))
+        self.assertEqual(self.tool.ctx.settings.get("range"), 1800)
+        bad = await self.app.call("monitor", "set_range", {"window": 999})
         self.assertEqual(bad["error"], "invalid_request")
 
     async def test_lease_expiry_stops_live_push_but_keeps_child(self):

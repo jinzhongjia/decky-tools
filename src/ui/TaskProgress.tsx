@@ -1,19 +1,28 @@
 import { ProgressBar } from "@decky/ui";
 import type { ReactNode } from "react";
 
+import { invoke } from "../core/api";
 import { guard } from "../core/errors";
-import { Task, cancelTask } from "../core/tasks";
 import { ActionRow } from "./ActionRow";
 import { fmtBytes } from "./format";
 import { t } from "./strings";
 
-function stageText(task: Task): string {
+/** 后端快照里进行中任务的字段(py_modules/deckytools/core/tasks.py 的 TaskManager.snapshot)。 */
+export interface TaskView {
+  id: string;
+  state: "queued" | "running";
+  stage: string;
+  done: number;
+  total: number;
+}
+
+function stageText(task: TaskView): string {
   if (task.state === "queued") return t("queued");
   const key = `stage_${task.stage}` as Parameters<typeof t>[0];
   return t(key) === key ? task.stage : t(key);
 }
 
-function ProgressInfo({ task }: { task: Task }) {
+function ProgressInfo({ task }: { task: TaskView }) {
   const known = task.total > 0;
   const pct = known ? Math.min(100, (task.done / task.total) * 100) : 0;
   const detail = !known
@@ -33,21 +42,15 @@ function ProgressInfo({ task }: { task: Task }) {
 }
 
 /** 通用进行中任务行:标题 + 进度条/阶段/字节数 + 取消按钮。 */
-export function TaskRow({
-  label,
-  task,
-  errorScope,
-}: {
-  label: ReactNode;
-  task: Task;
-  errorScope: string;
-}) {
+export function TaskRow(props: { label: ReactNode; task: TaskView; errorScope: string }) {
   return (
     <ActionRow
-      label={label}
-      description={<ProgressInfo task={task} />}
+      label={props.label}
+      description={<ProgressInfo task={props.task} />}
       action={t("cancel")}
-      onClick={() => guard(errorScope, () => cancelTask(task.id))}
+      onClick={() =>
+        guard(props.errorScope, () => invoke("core", "cancel_task", { id: props.task.id }))
+      }
     />
   );
 }

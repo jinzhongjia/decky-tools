@@ -1,10 +1,9 @@
 import { ConfirmModal, PanelSection, PanelSectionRow, showModal } from "@decky/ui";
 
-import { useStore } from "../../core/store";
 import { ActionRow } from "../../ui/ActionRow";
 import { Badge } from "../../ui/Badge";
-import { InstalledTool } from "./api";
-import { store, uninstall } from "./state";
+import { InstalledTool, ProtonView } from "./api";
+import { actions } from "./state";
 import { t } from "./strings";
 
 const dim: React.CSSProperties = { opacity: 0.6, fontSize: "0.85em", textAlign: "center" };
@@ -16,13 +15,13 @@ function confirmUninstall(tool: InstalledTool) {
       strDescription={t("uninstallBody")}
       strOKButtonText={t("uninstall")}
       bDestructiveWarning
-      onOK={() => uninstall(tool.name)}
+      onOK={() => actions.uninstall(tool.name)}
     />
   );
 }
 
-export function InstalledSection() {
-  const { installed, installedLoaded } = useStore(store);
+export function InstalledSection({ view }: { view: ProtonView }) {
+  const { installed, installed_loaded: installedLoaded } = view;
   return (
     <PanelSection title={`${t("installed")}${installed.length ? ` (${installed.length})` : ""}`}>
       {!installedLoaded && (
