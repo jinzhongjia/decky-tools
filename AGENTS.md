@@ -16,33 +16,43 @@ QAM (React)  ── callable("call", tool, method, params) ──▶  main.py �
      └──────── decky.emit("decky_tools_event", {tool,type,data}) ◀┘
 ```
 
+- **前端完全受后端控制**:状态与业务判断只在后端。后端持有每个工具的完整界面快照,
+  经 RPC 返回、经 `view` 事件推送;前端只做三件事——渲染快照、把用户操作发回后端、把错误码/通知 key 本地化。
+  前端可以保留的本地状态仅限纯展示(列表折叠、焦点等)。
+  - 通知:工具调用 `ctx.notify(key, params)`,后端排队并推 `core/notify`;前端显示后 `core.ack`。
+    前端不在线时(切换桌面/游戏模式、Steam 重启)留在队列,重新加载后经 `core.notifications` 补发,不会重复。
+  - 只有 Steam 前端能做的动作(重启 Steam、读写游戏启动参数等):后端经 `ctx.command(name)` 下令,
+    `src/core/commands.ts` 按白名单执行,前端不自行决定何时执行。
 - 需要原生能力的工具用 **Zig 子进程**:源码在 `backend/`(Zig 0.16,无 libc、静态链接),产物 `bin/<name>`;
   由 `core/child.py` 拉起,stdin 写命令行、stdout 读 NDJSON,stdin 关闭即退出。
 - **一个 RPC、一个事件**。前端只调 `call(tool, method, params)`,返回信封
   `{ok:true,data}` / `{ok:false,error:<code>}`;后端只发 `decky_tools_event`。新增功能不改 `main.py`。
 - `py_modules/deckytools/core/` —— 内核:`app.py`(装配 + 分发 + 错误信封 + `core` 工具:任务/全局选项)、
-  `tool.py`(`Tool` 基类、`@rpc`、`Context`)、`tasks.py`(后台任务:进度/阶段/取消/去重,事件推送)、
+  `tool.py`(`Tool` 基类、`@rpc`、`Context`:配置/任务/通知/命令)、`tasks.py`(后台任务:进度/阶段/取消/去重,回调给发起工具)、
+  `notify.py`(通知队列与确认)、
   `net.py`(urllib + certifi、下载续传、GitHub 镜像前缀)、`settings.py`(按工具命名空间的 JSON 配置)、
   `runtime.py`(隔离 `decky` 模块,单测时退化)、`log.py`、`errors.py`(稳定错误码)。
 - `py_modules/deckytools/tools/<id>/` —— 各工具。`proton/`:`sources.py`(数据驱动的发行源)、
   `compat.py`(compatibilitytools.d 列表/安全解压/卸载)、`installer.py`(空间检查→下载→sha512→解压)、
-  `cpu.py`(x86-64-v3 探测)、`tool.py`(RPC)。
-  `monitor/tool.py`:守护 `dt-monitor` 子进程(插件加载期间常驻,崩溃指数退避重启);实时推送按租约开关(前端每 5s `watch()` 续租,15s 无续租即 `live off`),历史经 `history(window)` 向子进程查询。
+  `cpu.py`(x86-64-v3 探测)、`steam.py`(读 /proc 判断 Steam 是否已重启)、`tool.py`(RPC + 界面快照)。
+  `monitor/tool.py`:守护 `dt-monitor` 子进程(插件加载期间常驻,崩溃指数退避重启);实时推送按租约开关(前端每 5s `watch()` 续租,15s 无续租即 `live off`),面板打开期间每秒向子进程取所选范围历史,由 `view.py` 算好功耗来源、内存占比、峰值/均值等后推送快照。
 - `backend/` —— Zig 子进程 `dt-monitor`:`sensors.zig`(按能力探测 hwmon/drm/power_supply)、`sampler.zig`(CPU 占用差分、内存 + 读数)、`history.zig`(30 分钟纯内存环形缓冲,按时间分桶求均值,不落盘)、
   `netinfo.zig`(rtnetlink 同步 dump 选推荐 IP)、`sysinfo.zig`(主机名/系统/内核/机型)、`main.zig`(timerfd + epoll 事件循环与 stdio 协议)。
   `Dockerfile` + `entrypoint.sh` 供 Decky CLI 在 release 打包时构建进 zip 的 `bin/`。
-- `src/core/` —— 前端内核:`api.ts`(唯一接口层:`invoke` / `onToolEvent`)、`tasks.ts`(任务镜像)、
+- `src/core/` —— 前端内核:`api.ts`(唯一接口层:`invoke` / `onToolEvent`)、`commands.ts`(执行后端下令的 Steam 动作)、
   `store.ts`(跨 QAM 重挂保留状态的模块级 store)、`errors.ts`(错误总线 + `guard`)、`i18n.ts`、`registry.ts`(`ToolDef`)。
-- `src/ui/` —— 通用组件:`Hub`(工具列表 ⇄ 工具面板 ⇄ 设置)、`ActionRow`、`LineChart`(SVG 折线图)、`MetricCard`(可聚焦指标卡)、`InfoRow`、`TaskProgress`(`TaskRow`)、`Badge`、`ErrorBanner`、`Boundary`、`Footer`、`Settings`。
+- `src/ui/` —— 通用组件:`notifications.ts`(显示后端通知并确认)、`Hub`(工具列表 ⇄ 工具面板 ⇄ 设置)、`ActionRow`、`LineChart`(SVG 折线图)、`MetricCard`(可聚焦指标卡)、`InfoRow`、`TaskProgress`(`TaskRow`)、`Badge`、`ErrorBanner`、`Boundary`、`Footer`、`Settings`。
 - `src/tools/<id>/` —— 各工具前端,`index.tsx` 导出 `ToolDef`,在 `src/tools/index.ts` 注册。
 
 ### 新增一个工具
 
 1. 后端:`py_modules/deckytools/tools/<id>/`,写 `Tool` 子类(`id = "<id>"`),对外方法加 `@rpc`;
-   耗时操作用 `self.ctx.start_task(kind, key, title, body)`,body 内阻塞工作放 `asyncio.to_thread`,
-   线程里调 `handle.check()` / `handle.progress()`。加入 `tools/__init__.py` 的 `TOOLS`。
-2. 前端:`src/tools/<id>/`,`api.ts` 用 `invoke(TOOL, method, params)` 声明接口,
-   `strings.ts` 用 `defineStrings` 写中英文案,`index.tsx` 导出 `ToolDef`,加入 `src/tools/index.ts`。
+   提供 `view()` 返回完整界面快照,状态变化时 `ctx.emit("view", snapshot)`;操作类 RPC 返回最新快照。
+   耗时操作用 `self.ctx.start_task(kind, key, title, body, on_change=...)`,body 内阻塞工作放 `asyncio.to_thread`,
+   线程里调 `handle.check()` / `handle.progress()`;进行中任务经 `ctx.task_snapshot(key)` 放进快照。
+   需要提示用户时 `ctx.notify(key, params)`。加入 `tools/__init__.py` 的 `TOOLS`。
+2. 前端:`src/tools/<id>/`,`api.ts` 声明接口与快照类型,`state.ts` 只存快照,组件只渲染;
+   `strings.ts` 用 `defineStrings` 写中英文案,`index.tsx` 导出 `ToolDef`(含通知文案 `message`),加入 `src/tools/index.ts`。
 3. 后端方法与前端 `api.ts` 是同一契约的两端,**同一次改动里同步修改**。
 
 ## 规划文档
