@@ -198,7 +198,7 @@ fn eligible(a: Address) bool {
 }
 
 pub fn format(buf: []u8, a: Address) []const u8 {
-    if (a.family == 2) return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ a.bytes[0], a.bytes[1], a.bytes[2], a.bytes[3] }) catch "";
+    if (a.family == 2) return std.mem.print(buf, "{d}.{d}.{d}.{d}", .{ a.bytes[0], a.bytes[1], a.bytes[2], a.bytes[3] }) catch "";
     var w = std.Io.Writer.fixed(buf);
     for (0..8) |i| {
         if (i > 0) w.writeByte(':') catch return "";

@@ -1,4 +1,4 @@
-//! 极简 JSON 输出:只需要字符串转义与可空整数。
+//! 极简 JSON 输出:字符串转义、可空整数、一位小数的定点数。不经过浮点格式化。
 const std = @import("std");
 
 pub fn string(w: *std.Io.Writer, text: []const u8) !void {
@@ -14,14 +14,21 @@ pub fn string(w: *std.Io.Writer, text: []const u8) !void {
     try w.writeByte('"');
 }
 
-/// 写 `"key":value`;value 为 null 时整项省略(缺失 ≠ 0)。
-pub fn optInt(w: *std.Io.Writer, first: *bool, comptime key: []const u8, value: ?i64) !void {
-    const v = value orelse return;
-    if (!first.*) try w.writeByte(',');
-    first.* = false;
-    try w.print("\"" ++ key ++ "\":{d}", .{v});
+/// 整数或 null。
+pub fn int(w: *std.Io.Writer, value: ?i32) !void {
+    const v = value orelse return w.writeAll("null");
+    try w.print("{d}", .{v});
 }
 
+/// 以 0.1 为单位的定点数写成一位小数(125 → 12.5,-5 → -0.5);null 写 null。
+pub fn tenths(w: *std.Io.Writer, value: ?i32) !void {
+    const v = value orelse return w.writeAll("null");
+    if (v < 0) try w.writeByte('-');
+    const a = @abs(v);
+    try w.print("{d}.{d}", .{ a / 10, a % 10 });
+}
+
+/// 写 `"key":value`;value 为空串时整项省略(系统信息里的可选字段)。
 pub fn optStr(w: *std.Io.Writer, first: *bool, comptime key: []const u8, value: []const u8) !void {
     if (value.len == 0) return;
     if (!first.*) try w.writeByte(',');
@@ -37,13 +44,17 @@ test "escapes control characters and quotes" {
     try std.testing.expectEqualStrings("\"a\\\"b\\\\\\u000a\"", w.buffered());
 }
 
-test "missing values are omitted" {
+test "numbers" {
     var buf: [64]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    var first = true;
-    try optInt(&w, &first, "a", null);
-    try optInt(&w, &first, "b", 0);
-    try optStr(&w, &first, "c", "");
-    try optStr(&w, &first, "d", "x");
-    try std.testing.expectEqualStrings("\"b\":0,\"d\":\"x\"", w.buffered());
+    try tenths(&w, 125);
+    try w.writeByte(' ');
+    try tenths(&w, -5);
+    try w.writeByte(' ');
+    try tenths(&w, 0);
+    try w.writeByte(' ');
+    try tenths(&w, null);
+    try w.writeByte(' ');
+    try int(&w, -42);
+    try std.testing.expectEqualStrings("12.5 -0.5 0.0 null -42", w.buffered());
 }

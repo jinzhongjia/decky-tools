@@ -50,12 +50,12 @@ jobs:
         run: pnpm build
 
   zig:
-    name: Zig backend (0.16.0)
+    name: Zig backend (0.17.0)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
-      ZIG_VERSION: "0.16.0"
-      ZIG_SHA256: "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
+      ZIG_VERSION: "0.17.0"
+      ZIG_SHA256: "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026"
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:

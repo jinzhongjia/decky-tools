@@ -2,10 +2,17 @@
 const std = @import("std");
 const sys = @import("sys.zig");
 
+/// 复制成以 0 结尾的路径(syscall 需要);放不下返回 null。
+fn zpath(buf: []u8, path: []const u8) ?[:0]const u8 {
+    if (path.len >= buf.len) return null;
+    @memcpy(buf[0..path.len], path);
+    buf[path.len] = 0;
+    return buf[0..path.len :0];
+}
+
 pub fn open(path: []const u8) !i32 {
-    var buf: [1024]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return error.PathTooLong;
-    return sys.open(z);
+    var buf: [512]u8 = undefined;
+    return sys.open(zpath(&buf, path) orelse return error.PathTooLong);
 }
 
 /// 一次性读取小文件并去掉首尾空白。
@@ -44,14 +51,20 @@ pub const Value = struct {
     }
 };
 
+/// 原样读取(不去空白,用于二进制文件);失败或为空返回 null。
+pub fn pread(v: Value, buf: []u8) ?usize {
+    if (v.fd < 0) return null;
+    const n = sys.pread(v.fd, buf, 0) catch return null;
+    return if (n == 0) null else n;
+}
+
 pub fn dir(path: []const u8) !sys.DirIter {
-    var buf: [1024]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&buf, "{s}", .{path}) catch return error.PathTooLong;
-    return sys.DirIter.open(z);
+    var buf: [512]u8 = undefined;
+    return sys.DirIter.open(zpath(&buf, path) orelse return error.PathTooLong);
 }
 
 pub fn join(buf: []u8, comptime fmt: []const u8, args: anytype) ?[]const u8 {
-    return std.fmt.bufPrint(buf, fmt, args) catch null;
+    return std.mem.print(buf, fmt, args) catch null;
 }
 
 /// 把 value 截断复制进定长缓冲区(以 0 结尾),配合 str() 取回切片。

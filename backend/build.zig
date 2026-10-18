@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{
         .default_target = .{ .cpu_arch = .x86_64, .os_tag = .linux },
     });
-    const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Build optimization mode") orelse .ReleaseSmall;
+    const optimize = b.option(std.lang.Optimize, "optimize", "Build optimization mode") orelse .small;
 
     const exe = b.addExecutable(.{
         .name = "dt-monitor",
@@ -14,8 +14,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .single_threaded = true,
-            .strip = optimize == .ReleaseSmall,
-            .unwind_tables = if (optimize != .Debug) .none else null,
+            .strip = optimize == .small,
+            .unwind_tables = if (optimize != .debug) .none else null,
         }),
     });
     // 全项目禁止 linkLibC() 与 @cImport
@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tests.zig"),
             .target = target,
-            .optimize = .Debug,
+            .optimize = .debug,
         }),
     });
     b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(tests).step);
