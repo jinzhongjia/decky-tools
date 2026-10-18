@@ -23,7 +23,7 @@ QAM (React)  ── callable("call", tool, method, params) ──▶  main.py �
     前端不在线时(切换桌面/游戏模式、Steam 重启)留在队列,重新加载后经 `core.notifications` 补发,不会重复。
   - 只有 Steam 前端能做的动作(重启 Steam、读写游戏启动参数等):后端经 `ctx.command(name)` 下令,
     `src/core/commands.ts` 按白名单执行,前端不自行决定何时执行。
-- 需要原生能力的工具用 **Zig 子进程**:源码在 `backend/`(Zig 0.16,无 libc、静态链接),产物 `bin/<name>`;
+- 需要原生能力的工具用 **Zig 子进程**:源码在 `backend/`(Zig 0.17,无 libc、静态链接),产物 `bin/<name>`;
   由 `core/child.py` 拉起,stdin 写命令行、stdout 读 NDJSON,stdin 关闭即退出。
 - **一个 RPC、一个事件**。前端只调 `call(tool, method, params)`,返回信封
   `{ok:true,data}` / `{ok:false,error:<code>}`;后端只发 `decky_tools_event`。新增功能不改 `main.py`。
@@ -35,9 +35,12 @@ QAM (React)  ── callable("call", tool, method, params) ──▶  main.py �
 - `py_modules/deckytools/tools/<id>/` —— 各工具。`proton/`:`sources.py`(数据驱动的发行源)、
   `compat.py`(compatibilitytools.d 列表/安全解压/卸载)、`installer.py`(空间检查→下载→sha512→解压)、
   `cpu.py`(x86-64-v3 探测)、`steam.py`(读 /proc 判断 Steam 是否已重启)、`tool.py`(RPC + 界面快照)。
-  `monitor/tool.py`:守护 `dt-monitor` 子进程(插件加载期间常驻,崩溃指数退避重启);实时推送按租约开关(前端每 5s `watch()` 续租,15s 无续租即 `live off`),面板打开期间每秒向子进程取所选范围历史,由 `view.py` 算好功耗来源、内存占比、峰值/均值等后推送快照。
-- `backend/` —— Zig 子进程 `dt-monitor`:`sensors.zig`(按能力探测 hwmon/drm/power_supply)、`sampler.zig`(CPU 占用差分、内存 + 读数)、`history.zig`(30 分钟纯内存环形缓冲,按时间分桶求均值,不落盘)、
-  `netinfo.zig`(rtnetlink 同步 dump 选推荐 IP)、`sysinfo.zig`(主机名/系统/内核/机型)、`main.zig`(timerfd + epoll 事件循环与 stdio 协议)。
+  `monitor/tool.py`:守护 `dt-monitor` 子进程(插件加载期间常驻;等待退出事件后按指数退避重启,不轮询);
+  租约用定时器实现(前端每 5s `watch()` 续租,15s 无续租即 `live off`);子进程每秒推来的快照行原样透传(见下方性能约定)。
+- `backend/` —— Zig 子进程 `dt-monitor`:`apu.zig`(AMD APU gpu_metrics 解析)、`sensors.zig`(apu 模式 / 通用 sysfs 模式)、
+  `battery.zig`(电池读数节流 + uevent 驱动的 status)、`sampler.zig`(CPU 占用差分、内存)、`history.zig`(按 tick 序号预聚合的环形桶,
+  2 分钟 × 1 秒、30 分钟 × 10 秒,纯内存)、`view.zig`(每秒的完整快照 JSON)、`out.zig`(非阻塞 stdout 整行队列)、
+  `netinfo.zig`(rtnetlink 选推荐 IP)、`sysinfo.zig`(主机名/系统/内核/机型)、`main.zig`(epoll 事件循环、调度提示与 stdio 协议)。
   `Dockerfile` + `entrypoint.sh` 供 Decky CLI 在 release 打包时构建进 zip 的 `bin/`。
 - `src/core/` —— 前端内核:`api.ts`(唯一接口层:`invoke` / `onToolEvent`)、`commands.ts`(执行后端下令的 Steam 动作)、
   `store.ts`(跨 QAM 重挂保留状态的模块级 store)、`errors.ts`(错误总线 + `guard`)、`i18n.ts`、`registry.ts`(`ToolDef`)。
@@ -71,6 +74,27 @@ QAM (React)  ── callable("call", tool, method, params) ──▶  main.py �
 - QAM 内所有展示条目都要能用十字键聚焦(`Focusable` / `Field focusable`),不能只支持触屏。
 - 代码里用 `ponytail:` 注释标记刻意的简化 / 延后项及其升级路径。
 
+## 性能约定(Steam Deck 实测,详见 git log 中的 Zig 0.17 优化提交)
+
+后台常驻的代码按"每秒都在付出"来写。设备上每次读取的 CPU 开销(Steam Deck OLED,1 秒间隔):
+
+| 数据源 | CPU | 说明 |
+|---|---|---|
+| amdgpu `gpu_metrics` | ~350 µs | SMU 固件往返,驱动忙等;一次拿到 GPU/CPU 频率温度与功耗,替代下面多项 |
+| 电池属性(缓存过期后首读) | ~340 µs | ACPI `_BST`,内核缓存 1 秒;为保证电量与功率是当前值,仍每秒读 |
+| 电池 `status`(放电时) | ~400 µs + 阻塞 1 ms | 额外查询交流适配器 `_PSR`;只在 uevent / 启动 / 每分钟读 |
+| ACPI 温度区 `acpitz` | ~200 µs | 每次求值 ACPI 方法;APU 上改用 gpu_metrics 的核心温度 |
+| `/proc/stat` | ~64 µs | 内核每次完整生成;只读首行 |
+| `/proc/meminfo` | ~25 µs | 同上 |
+| 单个普通 sysfs 属性 | ~3 µs | 系统调用本身(含 Zen 2 缓解措施)约 5 µs |
+
+- 新增数据源先在真机上量开销(含 1 秒间隔下的固件/ACPI 缓存行为),再决定读取频率。
+- 高频数据(≥ 1 Hz)由生产者(Zig)直接生成最终 JSON,Python 与 Decky loader 只透传字符串,不解析成对象再序列化;
+  低频的 RPC / 事件照常用结构化数据。
+- 高频负载尽量小:图表序列输出整数(48 像素高的图分辨不出 0.1%),续租心跳不重复传快照。
+- 空闲路径不得有定时轮询:子进程守护等待退出事件,租约用 `call_later`。
+- 后台采样进程设 `SCHED_BATCH` + nice 10 与 50 ms 定时器松弛,不抢占游戏线程,唤醒可与其它定时器合并。
+
 ## Logging rules
 
 - 复用 `decky.logger`,格式 `[scope] where: msg`;英文;插件目录有 `dev_mode` 标记(侧载部署时创建)时开 DEBUG。
@@ -84,7 +108,7 @@ pnpm install
 pnpm build                     # 前端 → dist/
 pnpm lint                      # tsc --noEmit + prettier --check;pnpm format 自动格式化
 pnpm test:py                   # 后端单测(stdlib unittest)
-bash scripts/build-backend.sh  # Zig 0.16 单测 + 构建 bin/dt-monitor(deploy.sh 会自动调用)
+bash scripts/build-backend.sh  # Zig 0.17 单测 + 构建 bin/dt-monitor(deploy.sh 会自动调用)
 DECK_HOST=deck@<ip> DECK_PASS=<sudo 口令> bash scripts/deploy.sh   # 构建并侧载到设备,重启 plugin_loader
 bash scripts/decky-build.sh    # 官方 Decky CLI 打 release zip → out/(默认 sudo + Docker;
                                # 无 sudo:DECKY_BUILD_SUDO=0 bash scripts/decky-build.sh --build-as-root)
