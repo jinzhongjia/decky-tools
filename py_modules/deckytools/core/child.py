@@ -18,6 +18,8 @@ _STDERR_LINES = 20  # 每次运行最多记录的 stderr 行数,防刷屏
 _LINE_LIMIT = 1 << 16
 
 OnMessage = Callable[[dict[str, Any]], Awaitable[None] | None]
+# 原始行钩子:返回 True 表示已处理,跳过 JSON 解析(高频消息透传用,见 tools/monitor)
+OnLine = Callable[[bytes], Awaitable[bool] | bool]
 
 
 def binary_path(name: str) -> str:
@@ -32,10 +34,11 @@ def _child_env() -> dict[str, str]:
 
 
 class ChildProcess:
-    def __init__(self, name: str, log: Logger, on_message: OnMessage):
+    def __init__(self, name: str, log: Logger, on_message: OnMessage, on_line: OnLine | None = None):
         self.name = name
         self._log = log
         self._on_message = on_message
+        self._on_line = on_line
         self._proc: asyncio.subprocess.Process | None = None
         self._tasks: list[asyncio.Task] = []
         self._warned_missing = False
@@ -72,6 +75,13 @@ class ChildProcess:
         except (BrokenPipeError, ConnectionResetError):
             raise ToolError(UNAVAILABLE, f"{self.name} pipe closed") from None
 
+    async def wait(self) -> int | None:
+        """等待当前子进程退出(崩溃或被停止),返回退出码;未运行时立即返回 None。"""
+        proc = self._proc
+        if proc is None:
+            return None
+        return await proc.wait()
+
     async def stop(self) -> None:
         proc, self._proc = self._proc, None
         if proc and proc.returncode is None:
@@ -104,6 +114,16 @@ class ChildProcess:
             level("child", f"{self.name} exited with code {code}")
 
     async def _dispatch(self, raw: bytes) -> None:
+        if self._on_line:
+            try:
+                handled = self._on_line(raw)
+                if asyncio.iscoroutine(handled):
+                    handled = await handled
+                if handled:
+                    return
+            except Exception as e:  # noqa: BLE001 —— 钩子异常不能终止读循环
+                self._log.error("child", f"{self.name} line hook failed: {type(e).__name__}: {e}")
+                return
         try:
             msg = json.loads(raw)
         except ValueError:
