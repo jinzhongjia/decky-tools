@@ -1,6 +1,7 @@
 import { invoke } from "../../core/api";
 
-// monitor 工具的后端接口与界面快照,对应 py_modules/deckytools/tools/monitor/tool.py 与 view.py。
+// monitor 工具的后端接口与界面快照。快照由 Zig 子进程生成(backend/src/view.zig),
+// 经 py_modules/deckytools/tools/monitor/tool.py 以 JSON 文本原样透传,在这里解析一次。
 // 数值已由后端换算好:百分比 0~100、温度 °C、频率 MHz、功率 mW、内存 MB;null = 本机不可用。
 export const TOOL = "monitor";
 
@@ -45,18 +46,33 @@ export interface MonitorView {
   current: Current | null;
   series: Series;
   power_stats: { peak: number; avg: number } | null;
+}
+
+/** 后端 watch / set_range 的返回:view 是快照的 JSON 文本(可能为 null),info 为系统信息。 */
+export interface Snapshot {
+  view: string | null;
   info: SystemInfo | null;
 }
 
-export function isView(v: unknown): v is MonitorView {
-  const s = v as MonitorView;
-  return (
-    !!s && typeof s.range === "number" && Array.isArray(s.ranges) && typeof s.series === "object"
-  );
+/** 解析快照文本;格式不对返回 null(当作没有快照)。 */
+export function parseView(text: unknown): MonitorView | null {
+  if (typeof text !== "string") return null;
+  try {
+    const v = JSON.parse(text) as MonitorView;
+    const ok =
+      typeof v.range === "number" && Array.isArray(v.ranges) && typeof v.series === "object";
+    return ok ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+export function isInfo(v: unknown): v is SystemInfo {
+  return !!v && typeof v === "object" && !Array.isArray(v);
 }
 
 export const monitorApi = {
-  watch: () => invoke<MonitorView>(TOOL, "watch"),
-  setRange: (window: number) => invoke<MonitorView>(TOOL, "set_range", { window }),
-  refreshInfo: () => invoke<null>(TOOL, "refresh_info"),
+  watch: (snapshot = true) => invoke<Snapshot>(TOOL, "watch", { snapshot }),
+  setRange: (window: number) => invoke<Snapshot>(TOOL, "set_range", { window }),
+  refreshInfo: () => invoke<SystemInfo | null>(TOOL, "refresh_info"),
 };

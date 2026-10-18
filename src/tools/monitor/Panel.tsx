@@ -1,5 +1,5 @@
 import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
-import { useEffect } from "react";
+import { memo, useEffect } from "react";
 
 import { useStore } from "../../core/store";
 import { ErrorBanner } from "../../ui/ErrorBanner";
@@ -12,7 +12,8 @@ import { t } from "./strings";
 
 const dim: React.CSSProperties = { opacity: 0.6, fontSize: "0.85em", textAlign: "center" };
 
-function SystemSection({ info }: { info: SystemInfo | null }) {
+// info 只在刷新时变化:memo 后每秒的快照更新不会重渲染这一区
+const SystemSection = memo(function SystemSection({ info }: { info: SystemInfo | null }) {
   const ip = info?.ip ? join(info.ip, info.interface ?? null) : info ? t("noNetwork") : null;
   const rows: [string, string | null | undefined][] = [
     [t("ip"), ip],
@@ -34,10 +35,10 @@ function SystemSection({ info }: { info: SystemInfo | null }) {
       </PanelSectionRow>
     </PanelSection>
   );
-}
+});
 
 export function MonitorPanel() {
-  const { view } = useStore(store);
+  const { view, info } = useStore(store);
   useEffect(() => startLive(), []);
   const c = view?.current;
   return (
@@ -55,7 +56,7 @@ export function MonitorPanel() {
           </PanelSectionRow>
         </PanelSection>
       )}
-      <SystemSection info={view?.info ?? null} />
+      <SystemSection info={info} />
     </>
   );
 }

@@ -13,33 +13,42 @@ export interface LineChartProps {
 
 function scaleMax(values: (number | null)[], max?: number, minMax = 1): number {
   if (max != null) return max;
-  const peak = Math.max(minMax, ...values.filter((v): v is number => v != null));
+  let peak = minMax;
+  for (const v of values) if (v != null && v > peak) peak = v;
   return peak * 1.15;
 }
 
-/** 按 null 切分成若干连续线段,每段生成 SVG points 字符串。 */
-function segments(values: (number | null)[], capacity: number, top: number, h: number): string[] {
-  const step = W / Math.max(1, capacity - 1);
-  const offset = capacity - values.length; // 数据不满一屏时靠右对齐
-  const out: string[] = [];
-  let cur: string[] = [];
-  values.forEach((v, i) => {
-    if (v == null) {
-      if (cur.length) out.push(cur.join(" "));
-      cur = [];
-      return;
-    }
-    const y = h - (Math.min(v, top) / top) * (h - 2) - 1;
-    cur.push(`${((offset + i) * step).toFixed(1)},${y.toFixed(1)}`);
-  });
-  if (cur.length) out.push(cur.join(" "));
-  return out;
+interface Segment {
+  points: string; // 折线
+  area: string; // 折线下方的填充区域:首尾各补一个落到底边的点
 }
 
-/** 折线下方的填充区域:首尾各补一个落到底边的点。 */
-function area(points: string, height: number): string {
-  const xs = points.split(" ").map((p) => p.split(",")[0]);
-  return `${xs[0]},${height} ${points} ${xs[xs.length - 1]},${height}`;
+/** 一次遍历按 null 切分成连续线段,直接生成折线与填充区域的 points 字符串。 */
+function segments(values: (number | null)[], capacity: number, top: number, h: number): Segment[] {
+  const step = W / Math.max(1, capacity - 1);
+  const offset = capacity - values.length; // 数据不满一屏时靠右对齐
+  const out: Segment[] = [];
+  let points = "";
+  let firstX = "";
+  let lastX = "";
+  const close = () => {
+    if (points) out.push({ points, area: `${firstX},${h} ${points} ${lastX},${h}` });
+    points = "";
+  };
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (v == null) {
+      close();
+      continue;
+    }
+    const x = ((offset + i) * step).toFixed(1);
+    const y = (h - (Math.min(v, top) / top) * (h - 2) - 1).toFixed(1);
+    if (!points) firstX = x;
+    points += points ? ` ${x},${y}` : `${x},${y}`;
+    lastX = x;
+  }
+  close();
+  return out;
 }
 
 export function LineChart({ values, capacity, color, max, minMax, height = 48 }: LineChartProps) {
@@ -61,13 +70,11 @@ export function LineChart({ values, capacity, color, max, minMax, height = 48 }:
         strokeDasharray="4 4"
         vectorEffect="non-scaling-stroke"
       />
-      {lines.map((points, i) => (
+      {lines.map((seg, i) => (
         <g key={i}>
-          {points.includes(" ") && (
-            <polygon points={area(points, height)} fill={color} opacity={0.15} />
-          )}
+          {seg.points.includes(" ") && <polygon points={seg.area} fill={color} opacity={0.15} />}
           <polyline
-            points={points}
+            points={seg.points}
             fill="none"
             stroke={color}
             strokeWidth={1.5}
